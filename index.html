@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <meta name="theme-color" content="#667eea">
+    <meta name="description" content="Bionic Vision - Colorblindness & Visual Condition Simulator. Experience the world through different visual conditions with real-time simulation and Daltonization corrections.">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Bionic Vision">
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%23667eea'/><text x='50' y='62' text-anchor='middle' font-size='50' fill='white'>👁</text></svg>">
+    <title>Bionic Vision - Colorblindness & Visual Condition Simulator</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Bionic Vision Simulator</h1>
+            <p>Experience the world through different visual conditions and see Daltonization corrections</p>
+        </header>
+
+        <div class="controls">
+            <div class="control-group">
+                <label for="mode">Simulation Mode:</label>
+                <select id="mode">
+                    <option value="normal">Normal Vision</option>
+                    <optgroup label="Color Vision Deficiencies">
+                        <option value="protanopia">Protanopia (Red Blind)</option>
+                        <option value="protanomaly">Protanomaly (Red Weak)</option>
+                        <option value="deuteranopia">Deuteranopia (Green Blind)</option>
+                        <option value="deuteranomaly">Deuteranomaly (Green Weak)</option>
+                        <option value="tritanopia">Tritanopia (Blue Blind)</option>
+                        <option value="tritanomaly">Tritanomaly (Blue Weak)</option>
+                        <option value="achromatopsia">Achromatopsia (Total Color Blind)</option>
+                        <option value="achromatomaly">Achromatomaly (Weak Total Color)</option>
+                    </optgroup>
+                    <optgroup label="Visual Pathologies">
+                        <option value="cataracts">Cataracts</option>
+                        <option value="glaucoma">Glaucoma (Tunnel Vision)</option>
+                        <option value="macular-degeneration">Macular Degeneration</option>
+                    </optgroup>
+                </select>
+            </div>
+
+            <div class="control-group" id="daltonizationGroup" style="display: none;">
+                <label for="daltonization">
+                    <input type="checkbox" id="daltonization" checked>
+                    Enable Daltonization Correction
+                </label>
+                <label for="splitView" style="margin-left: 15px;">
+                    <input type="checkbox" id="splitView">
+                    Split View Mode
+                </label>
+            </div>
+
+            <div class="control-group slider-group" id="splitSliderGroup" style="display: none;">
+                <label for="splitSlider">Split Position:</label>
+                <input type="range" id="splitSlider" min="0" max="100" value="50" class="slider">
+            </div>
+
+            <div class="control-group">
+                <label for="intensity">Intensity:</label>
+                <input type="range" id="intensity" min="0" max="100" value="100" class="slider">
+                <span id="intensityValue">100%</span>
+            </div>
+
+            <div class="control-group">
+                <button id="toggleCamera" class="btn">Start Webcam</button>
+                <button id="uploadBtn" class="btn secondary">Upload Image</button>
+                <input type="file" id="fileInput" accept="image/*" hidden>
+            </div>
+
+            <div class="control-group">
+                <button id="analyzeBtn" class="btn" style="background: #28a745;">Analyze Contrast</button>
+                <button id="exportBtn" class="btn secondary">Export Frame</button>
+            </div>
+        </div>
+
+        <div class="viewer-container">
+            <canvas id="canvas"></canvas>
+            <canvas id="offscreenCanvas" style="display: none;"></canvas>
+            <div class="loading" id="loading">Loading...</div>
+        </div>
+
+        <div class="panels-container">
+            <div class="info-panel">
+                <h3>Condition Info</h3>
+                <div id="conditionInfo">
+                    <p>Select a simulation mode to learn more about the condition.</p>
+                </div>
+            </div>
+
+            <div class="info-panel" id="accessibilityPanel" style="display: none;">
+                <h3>Accessibility Analysis <span id="analysisStatus" class="status-badge"></span></h3>
+                <div id="accessibilityContent">
+                    <p>Click "Analyze Contrast" to scan the current frame for WCAG compliance.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>
