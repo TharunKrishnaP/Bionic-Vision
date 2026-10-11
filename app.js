@@ -29,8 +29,6 @@ import {
 // DOM Elements
 const canvas = document.getElementById('canvas');
 const offscreenCanvas = document.getElementById('offscreenCanvas');
-const ctx = canvas.getContext('2d');
-const offscreenCtx = offscreenCanvas.getContext('2d');
 const modeSelect = document.getElementById('mode');
 const intensitySlider = document.getElementById('intensity');
 const intensityValue = document.getElementById('intensityValue');
@@ -50,9 +48,14 @@ const viewerContainer = document.querySelector('.viewer-container');
 const accessibilityPanel = document.getElementById('accessibilityPanel');
 const accessibilityContent = document.getElementById('accessibilityContent');
 const analysisStatus = document.getElementById('analysisStatus');
+const splitLine = document.getElementById('splitLine');
+const splitHandle = document.getElementById('splitHandle');
 
-// WebGL Context
+// Rendering Contexts
 let gl = null;
+let ctx = null; // Canvas 2D fallback context if WebGL is unavailable
+const offscreenCtx = offscreenCanvas.getContext('2d');
+
 let simulationProgram = null;
 let daltonizeProgram = null;
 let pathologyProgram = null;
@@ -72,8 +75,8 @@ let useSplitView = false;
 let splitPosition = 0.5;
 let currentImage = null;
 let animationFrameId = null;
-let splitHandle = null;
 let isDraggingSplit = false;
+let isHeatmapActive = false;
 
 // Accessibility state
 let currentAnalysis = null;
@@ -97,9 +100,16 @@ const CONDITION_INFO = {
 
 // Initialize WebGL
 function initWebGL() {
-    gl = canvas.getContext('webgl', { preserveDrawingBuffer: true, alpha: false });
+    try {
+        gl = canvas.getContext('webgl', { preserveDrawingBuffer: true, alpha: false }) ||
+             canvas.getContext('experimental-webgl', { preserveDrawingBuffer: true, alpha: false });
+    } catch (e) {
+        console.warn('WebGL initialization exception:', e);
+    }
+
     if (!gl) {
         console.warn('WebGL not supported, falling back to Canvas 2D');
+        ctx = canvas.getContext('2d');
         return false;
     }
 
@@ -110,7 +120,9 @@ function initWebGL() {
     splitViewProgram = new ShaderProgram(gl, VERTEX_SHADER_SOURCE, SPLIT_VIEW_FRAGMENT_SHADER_SOURCE);
 
     if (!simulationProgram.program || !daltonizeProgram.program || !pathologyProgram.program || !splitViewProgram.program) {
-        console.error('Failed to create shader programs');
+        console.error('Failed to create shader programs, falling back to 2D');
+        gl = null;
+        ctx = canvas.getContext('2d');
         return false;
     }
 
@@ -146,29 +158,68 @@ function initWebGL() {
     return true;
 }
 
+// Clear canvas helper
+function clearCanvas() {
+    if (gl) {
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+    } else if (ctx) {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+}
+
 // Resize canvas to match display size
 function resizeCanvas() {
     const container = viewerContainer;
     const rect = container.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
+
+    let targetW = Math.max(320, Math.floor(rect.width * dpr));
+    let targetH = Math.max(240, Math.floor((rect.height || 480) * dpr));
+
+    if (currentImage) {
+        const srcW = currentImage.videoWidth || currentImage.naturalWidth || currentImage.width;
+        const srcH = currentImage.videoHeight || currentImage.naturalHeight || currentImage.height;
+        if (srcW && srcH) {
+            targetW = srcW;
+            targetH = srcH;
+        }
+    }
     
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    canvas.style.width = rect.width + 'px';
-    canvas.style.height = rect.height + 'px';
-    
-    offscreenCanvas.width = canvas.width;
-    offscreenCanvas.height = canvas.height;
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+        offscreenCanvas.width = targetW;
+        offscreenCanvas.height = targetH;
+    }
     
     if (gl) {
         gl.viewport(0, 0, canvas.width, canvas.height);
     }
+
+    updateSplitLineUI();
 }
 
 // Update texture with video frame or image
 function updateTexture(source) {
+    if (!gl || !texture) return;
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+}
+
+// Setup quad geometry for shader program
+function setupQuad(program) {
+    const posLoc = program.getAttribLocation('a_position');
+    const texLoc = program.getAttribLocation('a_texCoord');
+    
+    gl.enableVertexAttribArray(posLoc);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    
+    gl.enableVertexAttribArray(texLoc);
+    gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+    gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 0, 0);
 }
 
 // Render using WebGL
@@ -186,72 +237,63 @@ function renderWebGL() {
     const useDalton = useDaltonization && DALTONIZE_MATRICES[currentMode] && !isNormal && !isPathology;
 
     let program;
-    if (useSplitView && !isNormal) {
-        program = splitViewProgram;
-    } else if (isPathology) {
+    if (isPathology) {
         program = pathologyProgram;
+    } else if (useSplitView && !isNormal) {
+        program = splitViewProgram;
     } else if (useDalton && simMatrix) {
         program = daltonizeProgram;
-    } else if (simMatrix) {
-        program = simulationProgram;
     } else {
-        program = simulationProgram; // Normal - just passthrough
+        program = simulationProgram;
     }
 
     program.use();
+    setupQuad(program);
 
-    // Set up attributes
-    const posLoc = program.getAttribLocation('a_position');
-    const texLoc = program.getAttribLocation('a_texCoord');
-    
-    gl.enableVertexAttribArray(posLoc);
-    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
-    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
-    
-    gl.enableVertexAttribArray(texLoc);
-    gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
-    gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 0, 0);
-
-    // Set uniforms
+    // Common uniforms
     gl.uniform1i(program.getUniformLocation('u_image'), 0);
     gl.uniform1f(program.getUniformLocation('u_intensity'), currentIntensity);
 
-    if (program === simulationProgram || program === splitViewProgram) {
-        program.setUniformMatrix3fv('u_rgbToLms', RGB_TO_LMS);
-        program.setUniformMatrix3fv('u_lmsToRgb', LMS_TO_RGB);
-    }
+    const identityMatrix = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 
     if (program === simulationProgram) {
+        program.setUniformMatrix3fv('u_rgbToLms', RGB_TO_LMS);
+        program.setUniformMatrix3fv('u_lmsToRgb', LMS_TO_RGB);
         gl.uniform1i(program.getUniformLocation('u_enabled'), simMatrix ? 1 : 0);
         if (simMatrix) {
             program.setUniformMatrix3fv('u_simMatrix', simMatrix);
+        } else {
+            program.setUniformMatrix3fv('u_simMatrix', identityMatrix);
         }
     } else if (program === daltonizeProgram) {
-        const daltonMatrix = DALTONIZE_MATRICES[currentMode];
-        gl.uniform1i(program.getUniformLocation('u_enabled'), daltonMatrix ? 1 : 0);
-        if (daltonMatrix) {
-            program.setUniformMatrix3fv('u_daltonizeMatrix', daltonMatrix);
-        }
+        program.setUniformMatrix3fv('u_rgbToLms', RGB_TO_LMS);
+        program.setUniformMatrix3fv('u_lmsToRgb', LMS_TO_RGB);
+        program.setUniformMatrix3fv('u_simMatrix', simMatrix || identityMatrix);
+        const daltonMatrix = DALTONIZE_MATRICES[currentMode] || identityMatrix;
+        gl.uniform1i(program.getUniformLocation('u_enabled'), 1);
+        program.setUniformMatrix3fv('u_daltonizeMatrix', daltonMatrix);
     } else if (program === pathologyProgram) {
         const conditionMap = { 'cataracts': 1, 'glaucoma': 2, 'macular-degeneration': 3 };
         gl.uniform1i(program.getUniformLocation('u_condition'), conditionMap[currentMode] || 0);
-        program.setUniform2f(program.getUniformLocation('u_resolution'), canvas.width, canvas.height);
+        program.setUniform2f('u_resolution', canvas.width, canvas.height);
     } else if (program === splitViewProgram) {
-        const leftSim = currentMode;
-        const rightSim = useDaltonization ? currentMode : 'normal';
+        program.setUniformMatrix3fv('u_rgbToLms', RGB_TO_LMS);
+        program.setUniformMatrix3fv('u_lmsToRgb', LMS_TO_RGB);
         
         gl.uniform1f(program.getUniformLocation('u_splitPos'), splitPosition);
-        gl.uniform1i(program.getUniformLocation('u_useLeftSim'), simMatrix ? 1 : 0);
-        gl.uniform1i(program.getUniformLocation('u_useRightSim'), useDaltonization && DALTONIZE_MATRICES[currentMode] ? 1 : 0);
-        gl.uniform1i(program.getUniformLocation('u_useLeftDalton'), false);
-        gl.uniform1i(program.getUniformLocation('u_useRightDalton'), useDaltonization && DALTONIZE_MATRICES[currentMode] ? 1 : 0);
         
-        if (simMatrix) {
-            program.setUniformMatrix3fv('u_simMatrixLeft', simMatrix);
-        }
-        if (useDaltonization && DALTONIZE_MATRICES[currentMode]) {
-            program.setUniformMatrix3fv('u_daltonizeMatrixRight', DALTONIZE_MATRICES[currentMode]);
-        }
+        // Left side: uncorrected condition simulation
+        gl.uniform1i(program.getUniformLocation('u_useLeftSim'), simMatrix ? 1 : 0);
+        gl.uniform1i(program.getUniformLocation('u_useLeftDalton'), 0);
+        program.setUniformMatrix3fv('u_simMatrixLeft', simMatrix || identityMatrix);
+        program.setUniformMatrix3fv('u_daltonizeMatrixLeft', identityMatrix);
+
+        // Right side: Daltonized simulation if Daltonization enabled, otherwise normal RGB
+        const hasDalton = useDaltonization && DALTONIZE_MATRICES[currentMode];
+        gl.uniform1i(program.getUniformLocation('u_useRightSim'), hasDalton ? 1 : 0);
+        gl.uniform1i(program.getUniformLocation('u_useRightDalton'), hasDalton ? 1 : 0);
+        program.setUniformMatrix3fv('u_simMatrixRight', simMatrix || identityMatrix);
+        program.setUniformMatrix3fv('u_daltonizeMatrixRight', hasDalton ? DALTONIZE_MATRICES[currentMode] : identityMatrix);
     }
 
     gl.drawArrays(gl.TRIANGLES, 0, 6);
@@ -259,7 +301,7 @@ function renderWebGL() {
 
 // Fallback Canvas 2D rendering (CPU)
 function renderCanvas2D() {
-    if (!currentImage) return;
+    if (!ctx || !currentImage) return;
 
     const w = offscreenCanvas.width;
     const h = offscreenCanvas.height;
@@ -273,7 +315,7 @@ function renderCanvas2D() {
     const isPathology = ['cataracts', 'glaucoma', 'macular-degeneration'].includes(currentMode);
     const isNormal = currentMode === 'normal';
 
-    if (useSplitView && !isNormal) {
+    if (useSplitView && !isNormal && !isPathology) {
         const splitX = Math.floor(w * splitPosition);
         
         for (let y = 0; y < h; y++) {
@@ -286,21 +328,15 @@ function renderCanvas2D() {
                 let resultR = r, resultG = g, resultB = b;
 
                 if (x < splitX) {
-                    // Left side - simulation
-                    if (simMatrix && !isPathology) {
+                    // Left side - uncorrected simulation
+                    if (simMatrix) {
                         const sim = simulateColorblindness(r, g, b, currentMode, currentIntensity);
-                        resultR = sim.r; resultG = sim.g; resultB = sim.b;
-                    } else if (isPathology) {
-                        // Pathology on left side
-                        const sim = applyPathologyCPU(r, g, b, x, y, w, h, currentMode, currentIntensity);
                         resultR = sim.r; resultG = sim.g; resultB = sim.b;
                     }
                 } else {
                     // Right side - daltonization or normal
-                    if (useDaltonization && DALTONIZE_MATRICES[currentMode] && !isPathology) {
-                        // First simulate, then daltonize
-                        const sim = simulateColorblindness(r, g, b, currentMode, currentIntensity);
-                        const dalt = daltonize(sim.r, sim.g, sim.b, currentMode, currentIntensity);
+                    if (useDaltonization && DALTONIZE_MATRICES[currentMode]) {
+                        const dalt = daltonize(r, g, b, currentMode, currentIntensity);
                         resultR = dalt.r; resultG = dalt.g; resultB = dalt.b;
                     }
                 }
@@ -325,14 +361,12 @@ function renderCanvas2D() {
                     const y = Math.floor((i / 4) / w);
                     const sim = applyPathologyCPU(r, g, b, x, y, w, h, currentMode, currentIntensity);
                     resultR = sim.r; resultG = sim.g; resultB = sim.b;
+                } else if (useDaltonization && DALTONIZE_MATRICES[currentMode]) {
+                    const dalt = daltonize(r, g, b, currentMode, currentIntensity);
+                    resultR = dalt.r; resultG = dalt.g; resultB = dalt.b;
                 } else if (simMatrix) {
                     const sim = simulateColorblindness(r, g, b, currentMode, currentIntensity);
                     resultR = sim.r; resultG = sim.g; resultB = sim.b;
-
-                    if (useDaltonization && DALTONIZE_MATRICES[currentMode]) {
-                        const dalt = daltonize(resultR, resultG, resultB, currentMode, currentIntensity);
-                        resultR = dalt.r; resultG = dalt.g; resultB = dalt.b;
-                    }
                 }
             }
 
@@ -343,11 +377,6 @@ function renderCanvas2D() {
     }
 
     ctx.putImageData(imageData, 0, 0);
-
-    // Draw split line if in split view
-    if (useSplitView && !isNormal) {
-        drawSplitLine();
-    }
 }
 
 function applyPathologyCPU(r, g, b, x, y, w, h, mode, intensity) {
@@ -358,7 +387,6 @@ function applyPathologyCPU(r, g, b, x, y, w, h, mode, intensity) {
     const dist = Math.sqrt(dx * dx + dy * dy);
 
     if (mode === 'cataracts') {
-        // Simple blur approximation + contrast reduction
         const gray = 0.299 * r + 0.587 * g + 0.114 * b;
         const factor = intensity * 0.5;
         return {
@@ -394,99 +422,193 @@ function applyPathologyCPU(r, g, b, x, y, w, h, mode, intensity) {
     return { r, g, b };
 }
 
-function drawSplitLine() {
-    const x = canvas.width * splitPosition;
-    ctx.save();
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 3;
-    ctx.shadowColor = '#fff';
-    ctx.shadowBlur = 10;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, canvas.height);
-    ctx.stroke();
-    
-    // Draw handle
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = '#667eea';
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.arc(x, canvas.height / 2, 18, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    
-    // Handle lines
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(x - 10, canvas.height / 2 - 15);
-    ctx.lineTo(x - 10, canvas.height / 2 + 15);
-    ctx.moveTo(x + 10, canvas.height / 2 - 15);
-    ctx.lineTo(x + 10, canvas.height / 2 + 15);
-    ctx.stroke();
-    ctx.restore();
+// Render current frame with active pipeline
+function renderCurrentFrame() {
+    if (gl && simulationProgram && simulationProgram.program) {
+        renderWebGL();
+    } else {
+        renderCanvas2D();
+    }
 }
 
 // Animation loop
 function animate() {
-    if (videoElement && videoElement.readyState === videoElement.HAVE_ENOUGH_DATA) {
+    if (!isCameraOn) return;
+
+    if (videoElement && videoElement.readyState >= 2) {
         currentImage = videoElement;
     }
     
-    if (currentImage) {
-        if (gl && simulationProgram.program) {
-            renderWebGL();
-        } else {
-            renderCanvas2D();
-        }
+    if (currentImage && !isHeatmapActive) {
+        renderCurrentFrame();
     }
     
     animationFrameId = requestAnimationFrame(animate);
 }
 
+// Helper to obtain mediaDevices getUserMedia across environments
+function getCameraAccessFunction() {
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
+        return (constraints) => navigator.mediaDevices.getUserMedia(constraints);
+    }
+    const legacy = navigator.getUserMedia ||
+                   navigator.webkitGetUserMedia ||
+                   navigator.mozGetUserMedia ||
+                   navigator.msGetUserMedia;
+    if (legacy) {
+        return (constraints) => new Promise((resolve, reject) => {
+            legacy.call(navigator, constraints, resolve, reject);
+        });
+    }
+    return null;
+}
+
 // Webcam handling
 async function startCamera() {
+    const getUserMediaFn = getCameraAccessFunction();
+    if (!getUserMediaFn) {
+        const isSecure = window.isSecureContext !== false;
+        alert(
+            'Unable to access camera: Web browser blocked camera API.\n\n' +
+            (!isSecure ? 'Reason: Not in a Secure Context (browsers require HTTPS or http://localhost to use webcams).\n\n' : '') +
+            'Solutions:\n' +
+            '1. Access the app via http://localhost:8080/ or https://\n' +
+            '2. If testing locally, run "npm start" and open http://localhost:8080/\n' +
+            '3. Or click "Upload Image" to test all simulations and contrast analysis immediately!'
+        );
+        return;
+    }
+
     try {
         loading.classList.add('active');
         console.log('Requesting camera access...');
         
-        // Try back camera first, fallback to any camera
-        let constraints = {
-            video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
-            audio: false
-        };
-        
-        try {
-            videoStream = await navigator.mediaDevices.getUserMedia(constraints);
-        } catch (err) {
-            console.log('Back camera failed, trying any camera:', err.message);
-            constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false };
-            videoStream = await navigator.mediaDevices.getUserMedia(constraints);
+        // Multi-tier constraint fallback: back camera -> ideal HD -> generic any video
+        const constraintTiers = [
+            { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+            { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+            { video: true, audio: false }
+        ];
+
+        let stream = null;
+        let lastError = null;
+
+        for (const constraints of constraintTiers) {
+            try {
+                stream = await getUserMediaFn(constraints);
+                if (stream) break;
+            } catch (err) {
+                lastError = err;
+                console.warn('Camera tier failed:', constraints, err.name, err.message);
+            }
         }
 
+        if (!stream) {
+            throw lastError || new Error('Could not access any camera devices.');
+        }
+
+        videoStream = stream;
+
+        // Create and configure video element
         videoElement = document.createElement('video');
-        videoElement.srcObject = videoStream;
-        videoElement.playsInline = true; // Important for iOS Safari
+        videoElement.autoplay = true;
         videoElement.muted = true;
-        
-        await videoElement.play().catch(err => {
-            console.error('Video play failed:', err);
-            throw err;
-        });
+        videoElement.playsInline = true;
+        videoElement.setAttribute('autoplay', '');
+        videoElement.setAttribute('muted', '');
+        videoElement.setAttribute('playsinline', '');
+        videoElement.setAttribute('webkit-playsinline', '');
 
+        // Attaching to DOM ensures WebKit / Blink hardware video decoder is active
+        videoElement.style.position = 'fixed';
+        videoElement.style.top = '-9999px';
+        videoElement.style.left = '-9999px';
+        videoElement.style.width = '1px';
+        videoElement.style.height = '1px';
+        videoElement.style.opacity = '0';
+        videoElement.style.pointerEvents = 'none';
+        document.body.appendChild(videoElement);
+
+        videoElement.srcObject = videoStream;
+
+        // Ensure video is playing and ready with frame dimensions
         await new Promise((resolve, reject) => {
-            videoElement.onloadeddata = resolve;
-            videoElement.onerror = reject;
-            setTimeout(() => reject(new Error('Video load timeout')), 10000);
+            let done = false;
+            const timeoutId = setTimeout(() => {
+                if (!done) {
+                    done = true;
+                    cleanup();
+                    if (videoElement.videoWidth > 0) {
+                        resolve();
+                    } else {
+                        reject(new Error('Timed out waiting for camera frames.'));
+                    }
+                }
+            }, 8000);
+
+            const cleanup = () => {
+                clearTimeout(timeoutId);
+                videoElement.removeEventListener('loadedmetadata', onMetadata);
+                videoElement.removeEventListener('canplay', onReady);
+                videoElement.removeEventListener('error', onError);
+            };
+
+            const onMetadata = async () => {
+                try {
+                    await videoElement.play();
+                } catch (playErr) {
+                    console.warn('Play attempt after metadata:', playErr);
+                }
+                if (videoElement.videoWidth > 0 && !done) {
+                    done = true;
+                    cleanup();
+                    resolve();
+                }
+            };
+
+            const onReady = async () => {
+                try {
+                    await videoElement.play();
+                } catch (playErr) {
+                    console.warn('Play attempt after canplay:', playErr);
+                }
+                if (!done) {
+                    done = true;
+                    cleanup();
+                    resolve();
+                }
+            };
+
+            const onError = (e) => {
+                if (!done) {
+                    done = true;
+                    cleanup();
+                    reject(e || new Error('Video stream element error.'));
+                }
+            };
+
+            videoElement.addEventListener('loadedmetadata', onMetadata);
+            videoElement.addEventListener('canplay', onReady);
+            videoElement.addEventListener('error', onError);
+
+            // Attempt immediate play
+            videoElement.play().catch(() => {});
+
+            if (videoElement.readyState >= 2 && videoElement.videoWidth > 0) {
+                done = true;
+                cleanup();
+                resolve();
+            }
         });
 
-        console.log('Camera started successfully', videoElement.videoWidth, 'x', videoElement.videoHeight);
+        console.log('Camera started successfully:', videoElement.videoWidth, 'x', videoElement.videoHeight);
         
+        currentImage = videoElement;
+        isCameraOn = true;
         toggleCameraBtn.textContent = 'Stop Webcam';
         toggleCameraBtn.classList.add('active');
-        isCameraOn = true;
         uploadBtn.disabled = true;
+        isHeatmapActive = false;
         
         resizeCanvas();
         animate();
@@ -494,18 +616,35 @@ async function startCamera() {
         loading.classList.remove('active');
     } catch (err) {
         console.error('Camera error:', err);
-        alert('Unable to access camera: ' + err.message + '\n\nTry: 1) Allow camera permission 2) Close other apps using camera 3) Use Upload Image instead');
         loading.classList.remove('active');
+        stopCamera();
+
+        let friendlyMsg = err.message;
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+            friendlyMsg = 'Camera permission was denied. Please click the lock/camera icon in your address bar and allow camera access.';
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+            friendlyMsg = 'No camera found on this device. Please connect a webcam or use "Upload Image".';
+        } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+            friendlyMsg = 'Camera is in use by another app (Zoom, Teams, or another tab). Please close other apps and try again.';
+        } else if (err.name === 'OverconstrainedError') {
+            friendlyMsg = 'Camera resolution constraints not supported by your hardware.';
+        }
+
+        alert('Unable to start webcam: ' + friendlyMsg + '\n\nYou can also click "Upload Image" to test any photo!');
     }
 }
 
 function stopCamera() {
     if (videoStream) {
-        videoStream.getTracks().forEach(track => track.stop());
+        videoStream.getTracks().forEach(track => {
+            try { track.stop(); } catch (e) {}
+        });
         videoStream = null;
     }
     if (videoElement) {
+        try { videoElement.pause(); } catch (e) {}
         videoElement.srcObject = null;
+        try { videoElement.remove(); } catch (e) {}
         videoElement = null;
     }
     currentImage = null;
@@ -513,34 +652,32 @@ function stopCamera() {
     toggleCameraBtn.classList.remove('active');
     isCameraOn = false;
     uploadBtn.disabled = false;
+    isHeatmapActive = false;
     
     if (animationFrameId) {
         cancelAnimationFrame(animationFrameId);
         animationFrameId = null;
     }
     
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    clearCanvas();
 }
 
 // Image upload handling
 function handleFileUpload(file) {
-    if (!file || !file.type.startsWith('image/')) return;
+    if (!file || !file.type.startsWith('image/')) {
+        alert('Please select a valid image file.');
+        return;
+    }
 
     loading.classList.add('active');
     
     const img = new Image();
     img.onload = () => {
-        currentImage = img;
         stopCamera();
+        currentImage = img;
+        isHeatmapActive = false;
         resizeCanvas();
-        
-        // Draw initial frame
-        if (gl && simulationProgram.program) {
-            renderWebGL();
-        } else {
-            renderCanvas2D();
-        }
-        
+        renderCurrentFrame();
         loading.classList.remove('active');
     };
     img.onerror = () => {
@@ -559,8 +696,16 @@ function updateModeUI() {
     // Show/hide daltonization for color blindness only
     daltonizationGroup.style.display = (isColorBlind && !isNormal) ? 'flex' : 'none';
     
+    // Disable daltonization & split view for pathologies or normal
+    if (isPathology || isNormal) {
+        daltonizationCheckbox.checked = false;
+        useDaltonization = false;
+        splitViewCheckbox.checked = false;
+        useSplitView = false;
+    }
+
     // Show/hide split slider
-    splitSliderGroup.style.display = useSplitView && !isNormal ? 'block' : 'none';
+    splitSliderGroup.style.display = (useSplitView && !isNormal && !isPathology) ? 'block' : 'none';
 
     // Update condition info
     const info = CONDITION_INFO[currentMode];
@@ -572,10 +717,32 @@ function updateModeUI() {
         `;
     }
 
-    // Disable daltonization for pathologies
-    if (isPathology) {
-        daltonizationCheckbox.checked = false;
-        useDaltonization = false;
+    updateSplitLineUI();
+}
+
+// Update DOM Split Line UI
+function updateSplitLineUI() {
+    if (!splitLine) return;
+    const isPathology = ['cataracts', 'glaucoma', 'macular-degeneration'].includes(currentMode);
+    if (useSplitView && currentMode !== 'normal' && !isPathology) {
+        splitLine.style.display = 'block';
+        splitLine.style.left = `${splitPosition * 100}%`;
+    } else {
+        splitLine.style.display = 'none';
+    }
+}
+
+// Update split position from client pointer X
+function updateSplitFromPointer(clientX) {
+    const rect = viewerContainer.getBoundingClientRect();
+    if (rect.width > 0) {
+        const x = clientX - rect.left;
+        splitPosition = Math.max(0.05, Math.min(0.95, x / rect.width));
+        splitSlider.value = Math.round(splitPosition * 100);
+        updateSplitLineUI();
+        if (currentImage && !isCameraOn) {
+            renderCurrentFrame();
+        }
     }
 }
 
@@ -583,64 +750,40 @@ function updateModeUI() {
 modeSelect.addEventListener('change', (e) => {
     currentMode = e.target.value;
     updateModeUI();
-    
-    if (currentImage) {
-        if (gl && simulationProgram.program) {
-            renderWebGL();
-        } else {
-            renderCanvas2D();
-        }
+    if (currentImage && !isCameraOn) {
+        renderCurrentFrame();
     }
 });
 
 intensitySlider.addEventListener('input', (e) => {
     currentIntensity = e.target.value / 100;
     intensityValue.textContent = e.target.value + '%';
-    
-    if (currentImage) {
-        if (gl && simulationProgram.program) {
-            renderWebGL();
-        } else {
-            renderCanvas2D();
-        }
+    if (currentImage && !isCameraOn) {
+        renderCurrentFrame();
     }
 });
 
 daltonizationCheckbox.addEventListener('change', (e) => {
     useDaltonization = e.target.checked;
     updateModeUI();
-    
-    if (currentImage) {
-        if (gl && simulationProgram.program) {
-            renderWebGL();
-        } else {
-            renderCanvas2D();
-        }
+    if (currentImage && !isCameraOn) {
+        renderCurrentFrame();
     }
 });
 
 splitViewCheckbox.addEventListener('change', (e) => {
     useSplitView = e.target.checked;
     updateModeUI();
-    
-    if (currentImage) {
-        if (gl && simulationProgram.program) {
-            renderWebGL();
-        } else {
-            renderCanvas2D();
-        }
+    if (currentImage && !isCameraOn) {
+        renderCurrentFrame();
     }
 });
 
 splitSlider.addEventListener('input', (e) => {
     splitPosition = e.target.value / 100;
-    
-    if (currentImage && useSplitView) {
-        if (gl && simulationProgram.program) {
-            renderWebGL();
-        } else {
-            renderCanvas2D();
-        }
+    updateSplitLineUI();
+    if (currentImage && useSplitView && !isCameraOn) {
+        renderCurrentFrame();
     }
 });
 
@@ -655,82 +798,63 @@ toggleCameraBtn.addEventListener('click', () => {
 uploadBtn.addEventListener('click', () => fileInput.click());
 
 fileInput.addEventListener('change', (e) => {
-    if (e.target.files[0]) {
+    if (e.target.files && e.target.files[0]) {
         handleFileUpload(e.target.files[0]);
     }
 });
 
 analyzeBtn.addEventListener('click', analyzeCurrentFrame);
-
 exportBtn.addEventListener('click', exportCurrentFrame);
 
 // Split line dragging - mouse and touch support
-function getClientX(e) {
-    return e.touches ? e.touches[0].clientX : e.clientX;
-}
-
 function startDrag(e) {
     if (!useSplitView || currentMode === 'normal') return;
-    
-    const rect = canvas.getBoundingClientRect();
-    const x = getClientX(e) - rect.left;
-    const splitX = canvas.width * splitPosition / (canvas.width / rect.width);
-    
-    if (Math.abs(x - splitX) < 30) { // Larger hit area for touch
-        isDraggingSplit = true;
-        canvas.style.cursor = 'ew-resize';
-        e.preventDefault(); // Prevent scrolling
-    }
+    isDraggingSplit = true;
+    document.body.style.cursor = 'ew-resize';
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    updateSplitFromPointer(clientX);
+    if (e.cancelable) e.preventDefault();
 }
 
 function handleDrag(e) {
     if (!isDraggingSplit) return;
-    
-    const rect = canvas.getBoundingClientRect();
-    const x = getClientX(e) - rect.left;
-    splitPosition = Math.max(0.1, Math.min(0.9, x / rect.width));
-    splitSlider.value = Math.round(splitPosition * 100);
-    
-    if (currentImage) {
-        if (gl && simulationProgram.program) {
-            renderWebGL();
-        } else {
-            renderCanvas2D();
-        }
-    }
-    e.preventDefault();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    updateSplitFromPointer(clientX);
+    if (e.cancelable) e.preventDefault();
 }
 
 function endDrag() {
-    isDraggingSplit = false;
-    canvas.style.cursor = 'default';
+    if (isDraggingSplit) {
+        isDraggingSplit = false;
+        document.body.style.cursor = 'default';
+    }
 }
 
-// Mouse events
-canvas.addEventListener('mousedown', startDrag);
+if (splitHandle) {
+    splitHandle.addEventListener('mousedown', startDrag);
+    splitHandle.addEventListener('touchstart', startDrag, { passive: false });
+}
+
 window.addEventListener('mousemove', handleDrag);
 window.addEventListener('mouseup', endDrag);
-
-// Touch events
-canvas.addEventListener('touchstart', startDrag, { passive: false });
 window.addEventListener('touchmove', handleDrag, { passive: false });
 window.addEventListener('touchend', endDrag);
 
 // Window resize
 window.addEventListener('resize', () => {
     resizeCanvas();
-    if (currentImage) {
-        if (gl && simulationProgram.program) {
-            renderWebGL();
-        } else {
-            renderCanvas2D();
-        }
+    if (currentImage && !isCameraOn) {
+        renderCurrentFrame();
     }
 });
 
 // Contrast Analysis
 async function analyzeCurrentFrame() {
-    if (!currentImage || isAnalyzing) return;
+    if (isAnalyzing) return;
+    if (!currentImage) {
+        alert('Please start the webcam or upload an image first.');
+        return;
+    }
     
     isAnalyzing = true;
     analyzeBtn.disabled = true;
@@ -740,17 +864,13 @@ async function analyzeCurrentFrame() {
     analysisStatus.className = 'status-badge pending';
     accessibilityContent.innerHTML = '<p>Analyzing contrast ratios...</p>';
     
-    // Small delay to let UI update
     await new Promise(r => setTimeout(r, 50));
     
     try {
-        // Get current frame data
         let imageData;
-        if (gl && simulationProgram.program) {
-            // Read from WebGL canvas
+        if (gl && simulationProgram && simulationProgram.program) {
             const pixels = new Uint8Array(canvas.width * canvas.height * 4);
             gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-            // WebGL reads bottom-up, need to flip
             const flipped = new Uint8ClampedArray(pixels.length);
             for (let y = 0; y < canvas.height; y++) {
                 const srcRow = (canvas.height - 1 - y) * canvas.width * 4;
@@ -759,19 +879,16 @@ async function analyzeCurrentFrame() {
             }
             imageData = new ImageData(flipped, canvas.width, canvas.height);
         } else {
-            // Use offscreen canvas
             offscreenCtx.drawImage(currentImage, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
             imageData = offscreenCtx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
         }
         
-        // Run analysis
         currentAnalysis = analyzeContrast(imageData, {
             sampleStep: 4,
             edgeThreshold: 25,
             maxEdgeSamples: 300
         });
         
-        // Display results
         displayAnalysisResults(currentAnalysis);
         
     } catch (err) {
@@ -789,13 +906,12 @@ async function analyzeCurrentFrame() {
 function displayAnalysisResults(analysis) {
     const { summary, details, dominantColors } = analysis;
     
-    // Determine overall status
     let overallStatus = 'fail';
     let statusText = 'FAIL';
-    if (summary.aaaPass > summary.totalPairs * 0.5) {
+    if (summary.totalPairs > 0 && summary.aaaPass > summary.totalPairs * 0.5) {
         overallStatus = 'pass-aaa';
         statusText = 'AAA PASS';
-    } else if (summary.aaPass > summary.totalPairs * 0.5) {
+    } else if (summary.totalPairs > 0 && summary.aaPass > summary.totalPairs * 0.5) {
         overallStatus = 'pass-aa';
         statusText = 'AA PASS';
     }
@@ -803,7 +919,6 @@ function displayAnalysisResults(analysis) {
     analysisStatus.textContent = statusText;
     analysisStatus.className = `status-badge ${overallStatus}`;
     
-    // Build HTML
     let html = `
         <div class="accessibility-summary">
             <div class="summary-item aaa">
@@ -833,7 +948,6 @@ function displayAnalysisResults(analysis) {
         </div>
     `;
     
-    // Worst offenders
     const worstFailures = details.filter(d => d.compliance === 'FAIL').slice(0, 10);
     if (worstFailures.length > 0) {
         html += '<h4 style="color: #dc3545; margin: 15px 0 10px;">Failing Contrast Pairs (WCAG AA)</h4>';
@@ -858,7 +972,6 @@ function displayAnalysisResults(analysis) {
         html += '</div>';
     }
     
-    // Passing pairs (AA but not AAA)
     const aaOnly = details.filter(d => d.compliance === 'AA').slice(0, 5);
     if (aaOnly.length > 0) {
         html += '<h4 style="color: #ffc107; margin: 15px 0 10px;">Passing AA (Not AAA)</h4>';
@@ -883,57 +996,88 @@ function displayAnalysisResults(analysis) {
         html += '</div>';
     }
     
-    // Dominant colors palette
     if (dominantColors.length > 0) {
         html += '<h4 style="margin: 15px 0 10px;">Dominant Colors</h4>';
         html += '<div class="dominant-palette">';
-        dominantColors.forEach((color, i) => {
+        dominantColors.forEach((color) => {
             const rgb = `rgb(${color.r}, ${color.g}, ${color.b})`;
             html += `<div class="palette-color" style="background: ${rgb};" title="RGB: ${color.r}, ${color.g}, ${color.b}"></div>`;
         });
         html += '</div>';
     }
     
-    // Actions
     html += `
         <div class="analysis-actions">
-            <button class="btn btn-small" onclick="generateHeatmap()">Show Heatmap</button>
-            <button class="btn btn-small secondary" onclick="exportAnalysis()">Export Report</button>
+            <button id="heatmapToggleBtn" class="btn btn-small">${isHeatmapActive ? 'Hide Heatmap' : 'Show Heatmap'}</button>
+            <button id="exportReportBtn" class="btn btn-small secondary">Export Report</button>
         </div>
     `;
     
     accessibilityContent.innerHTML = html;
-    
-    // Make functions globally accessible for onclick
-    window.generateHeatmap = () => showHeatmap();
-    window.exportAnalysis = () => exportAnalysisReport();
+
+    const heatmapToggleBtn = document.getElementById('heatmapToggleBtn');
+    if (heatmapToggleBtn) {
+        heatmapToggleBtn.addEventListener('click', toggleHeatmap);
+    }
+    const exportReportBtn = document.getElementById('exportReportBtn');
+    if (exportReportBtn) {
+        exportReportBtn.addEventListener('click', exportAnalysisReport);
+    }
 }
 
-function showHeatmap() {
-    if (!currentAnalysis || !currentImage) return;
-    
-    let imageData;
-    if (gl && simulationProgram.program) {
-        const pixels = new Uint8Array(canvas.width * canvas.height * 4);
-        gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-        const flipped = new Uint8ClampedArray(pixels.length);
-        for (let y = 0; y < canvas.height; y++) {
-            const srcRow = (canvas.height - 1 - y) * canvas.width * 4;
-            const dstRow = y * canvas.width * 4;
-            flipped.set(pixels.subarray(srcRow, srcRow + canvas.width * 4), dstRow);
-        }
-        imageData = new ImageData(flipped, canvas.width, canvas.height);
-    } else {
-        offscreenCtx.drawImage(currentImage, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
-        imageData = offscreenCtx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+function toggleHeatmap() {
+    if (!currentAnalysis || !currentImage) {
+        alert('Please analyze contrast first.');
+        return;
     }
     
-    const heatmap = generateContrastHeatmap(imageData, currentAnalysis, { opacity: 180 });
-    ctx.putImageData(heatmap, 0, 0);
+    isHeatmapActive = !isHeatmapActive;
+    const heatmapToggleBtn = document.getElementById('heatmapToggleBtn');
+    if (heatmapToggleBtn) {
+        heatmapToggleBtn.textContent = isHeatmapActive ? 'Hide Heatmap' : 'Show Heatmap';
+    }
+    
+    if (isHeatmapActive) {
+        let imageData;
+        if (gl && simulationProgram && simulationProgram.program) {
+            const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+            gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+            const flipped = new Uint8ClampedArray(pixels.length);
+            for (let y = 0; y < canvas.height; y++) {
+                const srcRow = (canvas.height - 1 - y) * canvas.width * 4;
+                const dstRow = y * canvas.width * 4;
+                flipped.set(pixels.subarray(srcRow, srcRow + canvas.width * 4), dstRow);
+            }
+            imageData = new ImageData(flipped, canvas.width, canvas.height);
+        } else {
+            offscreenCtx.drawImage(currentImage, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
+            imageData = offscreenCtx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+        }
+        
+        const heatmap = generateContrastHeatmap(imageData, currentAnalysis, { opacity: 180 });
+        
+        if (gl && simulationProgram && simulationProgram.program) {
+            updateTexture(heatmap);
+            gl.clearColor(0, 0, 0, 1);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            simulationProgram.use();
+            setupQuad(simulationProgram);
+            gl.uniform1i(simulationProgram.getUniformLocation('u_image'), 0);
+            gl.uniform1i(simulationProgram.getUniformLocation('u_enabled'), 0);
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        } else if (ctx) {
+            ctx.putImageData(heatmap, 0, 0);
+        }
+    } else {
+        renderCurrentFrame();
+    }
 }
 
 function exportAnalysisReport() {
-    if (!currentAnalysis) return;
+    if (!currentAnalysis) {
+        alert('Please analyze contrast first.');
+        return;
+    }
     
     const report = {
         timestamp: new Date().toISOString(),
@@ -955,17 +1099,18 @@ function exportAnalysisReport() {
 }
 
 function exportCurrentFrame() {
-    if (!currentImage) return;
-    
-    // Render current frame to canvas if needed
-    if (gl && simulationProgram.program) {
-        renderWebGL();
-    } else {
-        renderCanvas2D();
+    if (!currentImage) {
+        alert('Please start the webcam or upload an image first.');
+        return;
     }
     
-    // Export as PNG
+    renderCurrentFrame();
+    
     canvas.toBlob((blob) => {
+        if (!blob) {
+            alert('Failed to generate image file.');
+            return;
+        }
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -980,21 +1125,29 @@ function init() {
     console.log('Bionic Vision initializing...');
     
     const webglSupported = initWebGL();
-    console.log('WebGL:', webglSupported ? 'enabled' : 'fallback to Canvas 2D');
+    console.log('WebGL:', webglSupported ? 'enabled (GPU accelerated)' : 'fallback to Canvas 2D (CPU)');
     
     // Check for getUserMedia support
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        console.warn('getUserMedia not supported');
-        toggleCameraBtn.disabled = true;
-        toggleCameraBtn.title = 'Camera not supported in this browser';
+    if (!getCameraAccessFunction()) {
+        console.warn('getUserMedia not supported in this context (HTTPS or localhost required for camera)');
+        toggleCameraBtn.title = 'Camera requires a secure connection (HTTPS) or localhost';
     }
     
     resizeCanvas();
     updateModeUI();
+    clearCanvas();
     
-    // Initial render (black screen)
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Check URL parameters for PWA shortcuts
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('camera') === '1') {
+        startCamera();
+    } else if (urlParams.get('upload') === '1') {
+        fileInput.click();
+    }
+
+    // Window globals for inline button fallbacks
+    window.generateHeatmap = toggleHeatmap;
+    window.exportAnalysis = exportAnalysisReport;
     
     console.log('Bionic Vision ready!');
 }

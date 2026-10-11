@@ -76,12 +76,13 @@ function sampleImageColors(imageData, sampleStep = 4) {
 }
 
 // Find edge pixels (potential text boundaries) using simple gradient
-function findEdgePixels(imageData, threshold = 30) {
+function findEdgePixels(imageData, threshold = 30, step = 2) {
     const { data, width, height } = imageData;
     const edges = [];
+    const s = Math.max(1, Math.floor(step));
     
-    for (let y = 1; y < height - 1; y++) {
-        for (let x = 1; x < width - 1; x++) {
+    for (let y = 1; y < height - 1; y += s) {
+        for (let x = 1; x < width - 1; x += s) {
             const idx = (y * width + x) * 4;
             const idxR = (y * width + (x + 1)) * 4;
             const idxB = ((y + 1) * width + x) * 4;
@@ -155,8 +156,8 @@ export function analyzeContrast(imageData, options = {}) {
     // Find dominant colors
     const dominantColors = sampleImageColors(imageData, sampleStep);
     
-    // Find edges (text boundaries)
-    const edges = findEdgePixels(imageData, edgeThreshold);
+    // Find edges (text boundaries) with efficient step
+    const edges = findEdgePixels(imageData, edgeThreshold, Math.max(2, Math.floor(sampleStep / 2)));
     
     // Analyze contrast at edges
     const edgeResults = analyzeEdgeContrast(imageData, edges, maxEdgeSamples);

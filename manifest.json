@@ -2,7 +2,7 @@
     "name": "Bionic Vision - Colorblindness Simulator",
     "short_name": "Bionic Vision",
     "description": "Experience the world through different visual conditions with real-time simulation and Daltonization corrections",
-    "start_url": "/",
+    "start_url": "./",
     "display": "standalone",
     "background_color": "#1a1a1a",
     "theme_color": "#667eea",
@@ -19,12 +19,12 @@
     "shortcuts": [
         {
             "name": "Start Camera",
-            "url": "/?camera=1",
+            "url": "./?camera=1",
             "description": "Open with webcam active"
         },
         {
             "name": "Upload Image",
-            "url": "/?upload=1",
+            "url": "./?upload=1",
             "description": "Open image upload"
         }
     ]

@@ -90,23 +90,23 @@ const DALTONIZE_ERROR_PROJECTION = {
     ]
 };
 
-// Simple matrix-based daltonization for WebGL shaders (kept for GPU compatibility)
+// Simple matrix-based daltonization for WebGL shaders (retains base channel with 1.0 on diagonal)
 const DALTONIZE_PROTAN = [
-    [0.0, 0.0, 0.0],
-    [0.7, 1.0, 0.0],
-    [0.7, 0.0, 1.0]
+    [1.0, 0.0, 0.0],
+    [0.5, 1.0, 0.0],
+    [0.5, 0.0, 1.0]
 ];
 
 const DALTONIZE_DEUTERAN = [
-    [1.0, 0.7, 0.0],
-    [0.0, 0.0, 0.0],
-    [0.0, 0.7, 1.0]
+    [1.0, 0.5, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.5, 1.0]
 ];
 
 const DALTONIZE_TRITAN = [
-    [1.0, 0.0, 0.7],
-    [0.0, 1.0, 0.7],
-    [0.0, 0.0, 0.0]
+    [1.0, 0.0, 0.5],
+    [0.0, 1.0, 0.5],
+    [0.0, 0.0, 1.0]
 ];
 
 function getDeficiencyType(mode) {
@@ -236,20 +236,6 @@ function simulateColorblindness(r, g, b, mode, intensity = 1.0) {
     };
 }
 
-function daltonize(r, g, b, mode, intensity = 1.0) {
-    const daltonMatrix = DALTONIZE_MATRICES[mode];
-    if (!daltonMatrix) return { r, g, b };
-
-    const rgb = [r / 255, g / 255, b / 255];
-    const daltonRgb = multiplyMatrixVector(daltonMatrix, rgb);
-
-    return {
-        r: clamp((daltonRgb[0] * intensity + rgb[0] * (1 - intensity)) * 255, 0, 255),
-        g: clamp((daltonRgb[1] * intensity + rgb[1] * (1 - intensity)) * 255, 0, 255),
-        b: clamp((daltonRgb[2] * intensity + rgb[2] * (1 - intensity)) * 255, 0, 255)
-    };
-}
-
 function createCombinedMatrix(mode) {
     const simMatrix = SIMULATION_MATRICES[mode];
     if (!simMatrix) return LMS_TO_RGB; // Identity-like for normal
@@ -264,6 +250,7 @@ export {
     DALTONIZE_MATRICES,
     simulateColorblindness,
     daltonize,
+    daltonizeEnhanced,
     createCombinedMatrix,
     multiplyMatrixVector,
     multiplyMatrices

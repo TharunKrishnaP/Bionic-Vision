@@ -1,9 +1,6 @@
 # Dependencies
 node_modules/
 
-# Server
-server.js
-
 # Logs
 *.log
 npm-debug.log*

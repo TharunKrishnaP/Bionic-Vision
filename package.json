@@ -1,0 +1,23 @@
+{
+  "name": "bionic-vision",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Bionic Vision - Colorblindness & Visual Condition Simulator with Daltonization",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "colorblindness",
+    "simulator",
+    "daltonization",
+    "accessibility",
+    "webgl",
+    "vision"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

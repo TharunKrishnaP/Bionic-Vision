@@ -26,12 +26,12 @@ const SIMULATION_FRAGMENT_SHADER_SOURCE = `
     varying vec2 v_texCoord;
     
     void main() {
+        vec4 color = texture2D(u_image, v_texCoord);
         if (!u_enabled) {
-            gl_FragColor = texture2D(u_image, v_texCoord);
+            gl_FragColor = color;
             return;
         }
         
-        vec4 color = texture2D(u_image, v_texCoord);
         vec3 rgb = color.rgb;
         
         // Convert RGB to LMS
@@ -55,25 +55,32 @@ const DALTONIZE_FRAGMENT_SHADER_SOURCE = `
     precision highp float;
     
     uniform sampler2D u_image;
+    uniform mat3 u_rgbToLms;
+    uniform mat3 u_simMatrix;
+    uniform mat3 u_lmsToRgb;
     uniform mat3 u_daltonizeMatrix;
     uniform float u_intensity;
     uniform bool u_enabled;
     varying vec2 v_texCoord;
     
     void main() {
+        vec4 color = texture2D(u_image, v_texCoord);
         if (!u_enabled) {
-            gl_FragColor = texture2D(u_image, v_texCoord);
+            gl_FragColor = color;
             return;
         }
         
-        vec4 color = texture2D(u_image, v_texCoord);
         vec3 rgb = color.rgb;
         
         // Apply daltonization matrix directly in RGB space
         vec3 corrected = u_daltonizeMatrix * rgb;
         
+        // Simulate how the corrected colors are perceived under the color vision deficiency
+        vec3 simLms = u_simMatrix * (u_rgbToLms * corrected);
+        vec3 simRgb = u_lmsToRgb * simLms;
+        
         // Blend with original based on intensity
-        vec3 finalRgb = mix(rgb, corrected, u_intensity);
+        vec3 finalRgb = mix(rgb, simRgb, u_intensity);
         
         gl_FragColor = vec4(finalRgb, color.a);
     }
@@ -89,22 +96,24 @@ const PATHOLOGY_FRAGMENT_SHADER_SOURCE = `
     uniform vec2 u_resolution;
     varying vec2 v_texCoord;
     
-    // Gaussian blur for cataracts
+    // Gaussian blur for cataracts (constant loop bounds for WebGL 1.0 / GLSL ES 1.00 compliance)
     vec3 gaussianBlur(sampler2D tex, vec2 uv, float sigma) {
         vec3 color = vec3(0.0);
         float totalWeight = 0.0;
-        float radius = sigma * 3.0;
-        vec2 texelSize = 1.0 / u_resolution;
+        vec2 texelSize = 1.0 / max(u_resolution, vec2(1.0));
+        float s = max(0.1, sigma);
+        float twoSigmaSq = 2.0 * s * s;
         
-        for (float x = -radius; x <= radius; x += 1.0) {
-            for (float y = -radius; y <= radius; y += 1.0) {
-                vec2 offset = vec2(x, y) * texelSize;
-                float weight = exp(-(x*x + y*y) / (2.0 * sigma * sigma));
+        for (float x = -5.0; x <= 5.0; x += 1.0) {
+            for (float y = -5.0; y <= 5.0; y += 1.0) {
+                float distSq = x * x + y * y;
+                float weight = exp(-distSq / twoSigmaSq);
+                vec2 offset = vec2(x, y) * texelSize * (s * 0.4 + 0.6);
                 color += texture2D(tex, uv + offset).rgb * weight;
                 totalWeight += weight;
             }
         }
-        return color / totalWeight;
+        return totalWeight > 0.0 ? color / totalWeight : texture2D(tex, uv).rgb;
     }
     
     void main() {
@@ -167,8 +176,11 @@ const SPLIT_VIEW_FRAGMENT_SHADER_SOURCE = `
         return u_lmsToRgb * simLms;
     }
     
-    vec3 applyDaltonize(vec3 rgb, mat3 daltonMatrix) {
-        return daltonMatrix * rgb;
+    vec3 applyDaltonizeAndSim(vec3 rgb, mat3 daltonMatrix, mat3 simMatrix) {
+        vec3 daltonRgb = daltonMatrix * rgb;
+        vec3 lms = u_rgbToLms * daltonRgb;
+        vec3 simLms = simMatrix * lms;
+        return u_lmsToRgb * simLms;
     }
     
     void main() {
@@ -179,18 +191,20 @@ const SPLIT_VIEW_FRAGMENT_SHADER_SOURCE = `
         
         // Left side processing
         if (u_useLeftSim) {
-            leftResult = applySimulation(rgb, u_simMatrixLeft);
             if (u_useLeftDalton) {
-                leftResult = applyDaltonize(leftResult, u_daltonizeMatrixLeft);
+                leftResult = applyDaltonizeAndSim(rgb, u_daltonizeMatrixLeft, u_simMatrixLeft);
+            } else {
+                leftResult = applySimulation(rgb, u_simMatrixLeft);
             }
             leftResult = mix(rgb, leftResult, u_intensity);
         }
         
         // Right side processing
         if (u_useRightSim) {
-            rightResult = applySimulation(rgb, u_simMatrixRight);
             if (u_useRightDalton) {
-                rightResult = applyDaltonize(rightResult, u_daltonizeMatrixRight);
+                rightResult = applyDaltonizeAndSim(rgb, u_daltonizeMatrixRight, u_simMatrixRight);
+            } else {
+                rightResult = applySimulation(rgb, u_simMatrixRight);
             }
             rightResult = mix(rgb, rightResult, u_intensity);
         }
@@ -258,6 +272,7 @@ class ShaderProgram {
     }
     
     getUniformLocation(name) {
+        if (typeof name !== 'string') return name; // In case a WebGLUniformLocation is passed directly
         if (this.uniforms[name] === undefined) {
             this.uniforms[name] = this.gl.getUniformLocation(this.program, name);
         }
@@ -265,23 +280,43 @@ class ShaderProgram {
     }
     
     setUniformMatrix3fv(name, matrix) {
-        this.gl.uniformMatrix3fv(this.getUniformLocation(name), false, new Float32Array(matrix.flat()));
+        const loc = this.getUniformLocation(name);
+        if (!loc || !matrix) return;
+        // Transpose row-major (JavaScript) to column-major (WebGL GLSL)
+        const colMajor = new Float32Array([
+            matrix[0][0], matrix[1][0], matrix[2][0],
+            matrix[0][1], matrix[1][1], matrix[2][1],
+            matrix[0][2], matrix[1][2], matrix[2][2]
+        ]);
+        this.gl.uniformMatrix3fv(loc, false, colMajor);
     }
     
     setUniform1f(name, value) {
-        this.gl.uniform1f(this.getUniformLocation(name), value);
+        const loc = this.getUniformLocation(name);
+        if (loc !== null && loc !== undefined) {
+            this.gl.uniform1f(loc, value);
+        }
     }
     
     setUniform1i(name, value) {
-        this.gl.uniform1i(this.getUniformLocation(name), value);
+        const loc = this.getUniformLocation(name);
+        if (loc !== null && loc !== undefined) {
+            this.gl.uniform1i(loc, value);
+        }
     }
     
     setUniform2f(name, x, y) {
-        this.gl.uniform2f(this.getUniformLocation(name), x, y);
+        const loc = this.getUniformLocation(name);
+        if (loc !== null && loc !== undefined) {
+            this.gl.uniform2f(loc, x, y);
+        }
     }
     
     setUniform1iv(name, array) {
-        this.gl.uniform1iv(this.getUniformLocation(name), array);
+        const loc = this.getUniformLocation(name);
+        if (loc !== null && loc !== undefined) {
+            this.gl.uniform1iv(loc, array);
+        }
     }
 }
 
